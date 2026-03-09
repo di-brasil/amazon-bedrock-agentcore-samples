@@ -1,3 +1,4 @@
+
 import os
 import uuid
 import asyncio
@@ -19,13 +20,6 @@ from google.genai import types
 import boto3
 from bedrock_agentcore.memory import MemoryClient
 from lab_helpers.utils import get_ssm_parameter
-
-# OTEL imports for custom Strands-compatible span emitter
-from opentelemetry import trace as otel_trace
-from opentelemetry._logs import get_logger_provider, SeverityNumber
-from opentelemetry.sdk._logs import LoggerProvider, LogRecord
-from opentelemetry.trace import get_current_span
-import time
 
 # Initialize boto3 client
 sts_client = boto3.client('sts')
@@ -275,145 +269,6 @@ def web_search(keywords: str, region: str, max_results: int) -> str:
     )
 
 
-# ============================================================
-# Strands-compatible span emitter for AgentCore Evaluation
-# ============================================================
-# AgentCore Evaluation only recognizes spans from specific OTEL scopes.
-# Google ADK uses "gcp.vertex.agent" which is NOT recognized.
-# We emit a separate span that mimics the Strands SDK structure so the
-# evaluation service can extract input/output pairs.
-
-_eval_tracer = otel_trace.get_tracer("strands.telemetry.tracer")
-
-MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
-
-AGENT_TOOLS = '["get_product_info","get_return_policy","get_technical_support","check_warranty_status","web_search"]'
-
-
-class StrandsEvalSpan:
-    """Context manager that wraps the full agent invocation in a Strands-compatible span.
-
-    Usage:
-        with StrandsEvalSpan(user_input) as eval_span:
-            ... run ADK agent ...
-            eval_span.set_response(final_response)
-    """
-
-    def __init__(self, user_message: str, model_id: str = MODEL_ID, session_id: str = ""):
-        self.user_message = user_message
-        self.model_id = model_id
-        self.session_id = session_id
-        self.response = ""
-        self._span = None
-        self._token = None
-
-    def set_response(self, response: str):
-        self.response = response
-
-    def __enter__(self):
-        from datetime import datetime, timezone
-        self._start_time = datetime.now(timezone.utc).isoformat()
-        self._span = _eval_tracer.start_span(
-            "invoke_agent Strands Agents",
-            attributes={
-                "gen_ai.system": "strands-agents",
-                "gen_ai.request.model": self.model_id,
-                "gen_ai.agent.name": "Strands Agents",
-                "gen_ai.operation.name": "invoke_agent",
-                "gen_ai.agent.tools": AGENT_TOOLS,
-                "gen_ai.event.start_time": self._start_time,
-                "session.id": self.session_id,
-            },
-        )
-        self._token = otel_trace.use_span(self._span, end_on_exit=False)
-        self._token.__enter__()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        from datetime import datetime, timezone
-        import json
-        try:
-            end_time = datetime.now(timezone.utc).isoformat()
-            self._span.set_attribute("gen_ai.event.end_time", end_time)
-
-            # Add span events matching Strands SDK structure.
-            # The Strands SDK uses span.add_event() for input/output messages.
-            # The eval service reads these span events (NOT separate log records).
-            self._span.add_event(
-                "gen_ai.user.message",
-                attributes={"content": self.user_message},
-            )
-
-            if self.response:
-                self._span.add_event(
-                    "gen_ai.choice",
-                    attributes={
-                        "message": self.response,
-                        "finish_reason": "end_turn",
-                    },
-                )
-                self._span.set_status(otel_trace.StatusCode.OK)
-            else:
-                self._span.set_status(otel_trace.StatusCode.ERROR, "No response")
-
-            # Also emit OTEL log record for the runtime log group
-            # (belt-and-suspenders: eval service may need either or both)
-            self._emit_log_event()
-
-            print(f"[EvalSpan] Emitted strands-compatible span with events + log event")
-        except Exception as e:
-            print(f"[EvalSpan] Warning: Could not finalize span: {e}")
-        finally:
-            self._token.__exit__(exc_type, exc_val, exc_tb)
-            self._span.end()
-        return False
-
-    def _emit_log_event(self):
-        """Emit an OTEL log record that matches the Strands event structure."""
-        try:
-            span_context = self._span.get_span_context()
-            logger_provider = get_logger_provider()
-            logger = logger_provider.get_logger("strands.telemetry.tracer")
-
-            body = {
-                "input": {
-                    "messages": [
-                        {"content": self.user_message, "role": "user"}
-                    ]
-                },
-                "output": {
-                    "messages": [
-                        {
-                            "content": {
-                                "message": self.response,
-                                "finish_reason": "end_turn",
-                            },
-                            "role": "assistant",
-                        }
-                    ]
-                },
-            }
-
-            now_ns = time.time_ns()
-            log_record = LogRecord(
-                timestamp=now_ns,
-                observed_timestamp=now_ns,
-                severity_number=SeverityNumber.INFO,
-                body=body,
-                attributes={
-                    "event.name": "strands.telemetry.tracer",
-                    "session.id": self._span.attributes.get("session.id", ""),
-                },
-                trace_id=span_context.trace_id,
-                span_id=span_context.span_id,
-                trace_flags=span_context.trace_flags,
-            )
-            logger.emit(log_record)
-            print(f"[EvalSpan] Log event emitted for trace {span_context.trace_id:032x}")
-        except Exception as e:
-            print(f"[EvalSpan] Warning: Could not emit log event: {e}")
-
-
 # Initialize the AgentCore Runtime App
 app = BedrockAgentCoreApp()  #### AGENTCORE RUNTIME - LINE 2 ####
 
@@ -488,7 +343,7 @@ async def invoke(payload, context=None):
             else:
                 enriched_query = user_input
 
-            # --- 3. Create and run the ADK agent (wrapped in eval span) ---
+            # --- 3. Create and run the ADK agent ---
             agent = LlmAgent(
                 name="customer_support_agent",
                 model=LiteLlm(model="bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0"),
@@ -505,13 +360,11 @@ async def invoke(payload, context=None):
             content = types.Content(role="user", parts=[types.Part(text=enriched_query)])
 
             final_response = ""
-            with StrandsEvalSpan(user_input, session_id=str(session_id)) as eval_span:
-                async for event in runner.run_async(
-                    user_id="user_001", session_id=adk_session_id, new_message=content
-                ):
-                    if event.is_final_response():
-                        final_response = event.content.parts[0].text
-                eval_span.set_response(final_response)
+            async for event in runner.run_async(
+                user_id="user_001", session_id=adk_session_id, new_message=content
+            ):
+                if event.is_final_response():
+                    final_response = event.content.parts[0].text
 
             # --- 4. Save interaction to memory ---
             if final_response:

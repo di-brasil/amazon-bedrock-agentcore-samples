@@ -527,25 +527,24 @@ def create_agentcore_runtime_execution_role():
 
     try:
         # Check if role already exists
+        role_arn = None
         try:
             existing_role = iam.get_role(RoleName=role_name)
             print(f"ℹ️ Role {role_name} already exists")
-            print(f"Role ARN: {existing_role['Role']['Arn']}")
-            return existing_role["Role"]["Arn"]
+            role_arn = existing_role["Role"]["Arn"]
         except iam.exceptions.NoSuchEntityException:
-            pass
+            # Create IAM role
+            role_response = iam.create_role(
+                RoleName=role_name,
+                AssumeRolePolicyDocument=json.dumps(trust_policy),
+                Description="IAM role for Amazon Bedrock AgentCore with required permissions",
+            )
+            print(f"✅ Created IAM role: {role_name}")
+            role_arn = role_response["Role"]["Arn"]
 
-        # Create IAM role
-        role_response = iam.create_role(
-            RoleName=role_name,
-            AssumeRolePolicyDocument=json.dumps(trust_policy),
-            Description="IAM role for Amazon Bedrock AgentCore with required permissions",
-        )
+        print(f"Role ARN: {role_arn}")
 
-        print(f"✅ Created IAM role: {role_name}")
-        print(f"Role ARN: {role_response['Role']['Arn']}")
-
-        # Check if policy already exists
+        # Check if policy already exists, create if not
         policy_arn = f"arn:aws:iam::{account_id}:policy/{policy_name}"
 
         try:
@@ -575,9 +574,9 @@ def create_agentcore_runtime_execution_role():
 
         put_ssm_parameter(
             "/app/customersupport/agentcore/runtime_execution_role_arn",
-            role_response["Role"]["Arn"],
+            role_arn,
         )
-        return role_response["Role"]["Arn"]
+        return role_arn
 
     except Exception as e:
         print(f"❌ Error creating IAM role: {str(e)}")

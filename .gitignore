@@ -244,3 +244,6 @@ cdk.out/
 .vscode/
 
 node_modules
+
+### Original images backup - do not commit
+01-tutorials/09-AgentCore-E2E/images/images-og_do_not_commit/

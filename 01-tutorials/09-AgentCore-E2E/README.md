@@ -78,17 +78,7 @@ Deploy your agent to handle real traffic with full observability.
 
 **What you'll learn:** AgentCore Runtime with production-grade observability
 
-### Lab 5: Evaluate Agent Performance
-
-Set up continuous quality monitoring for your production agent.
-
-- Online evaluation configuration
-- Built-in quality metrics
-- Real-time performance dashboards
-
-**What you'll learn:** AgentCore Evaluations for production quality monitoring
-
-### Lab 6: Build Customer Interface
+### Lab 5: Build Customer Interface
 
 Create a web app customers can actually use.
 
